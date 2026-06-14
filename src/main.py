@@ -32,6 +32,7 @@ async def main() -> None:
     log("info", f"Logged in as {user['username']} ({user['id']})")
     log("info", f"Status: {settings.status}")
     log("info", f"Servers: {len(settings.servers)}")
+    log("info", f"Spam enabled: {settings.spam_enabled}, channel: {settings.spam_channel_id}, interval: {settings.spam_interval}")
 
     await run_all(settings)
 
