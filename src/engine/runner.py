@@ -5,7 +5,7 @@ import json
 import random
 import time
 from http import HTTPStatus
-from typing import Final
+from typing import Any, Final
 
 import httpx
 import websockets  # pyright: ignore[reportMissingImports]
@@ -16,12 +16,8 @@ from src.models.results import SessionState, User
 from src.utils.logger import log
 
 # Activity configuration
-APP_ID: Final[str] = "1425827351261872219"
 VERSION: Final[str] = __metadata__["version"]
 ACTIVITY_NAME: Final[str] = f"discord-streak v{VERSION}"
-ACTIVITY_DETAILS: Final[str] = "🔥 Keeping the streak alive"
-ACTIVITY_STATE: Final[str] = "⚡ 24/7 Online"
-REPO_URL: Final[str] = "https://github.com/getthevoid/discord-streak"
 
 # Reconnection settings
 BASE_DELAY: Final[float] = 1.0
@@ -29,16 +25,46 @@ MAX_DELAY: Final[float] = 60.0
 JITTER_FACTOR: Final[float] = 0.1
 
 
-def generate_client_properties(index: int) -> dict[str, str]:
+def generate_client_properties(index: int) -> dict[str, Any]:
     """Generate unique client properties for each connection (15 unique combos)."""
     os_list = ["Windows", "Linux", "Mac OS X"]
-    browser_list = ["Discord Client", "Chrome", "Firefox", "Safari", "Edge"]
+    browser_list = ["Chrome", "Firefox", "Safari", "Edge", "Discord Client"]
 
-    # All combinations: 3 OS × 5 browsers = 15 unique
     os_name = os_list[index % len(os_list)]
     browser = browser_list[index // len(os_list) % len(browser_list)]
 
-    return {"os": os_name, "browser": browser, "device": ""}
+    user_agents = {
+        "Chrome": "Mozilla/5.0 ({os}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Firefox": "Mozilla/5.0 ({os}; rv:127.0) Gecko/20100101 Firefox/127.0",
+        "Safari": "Mozilla/5.0 ({os}) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+        "Edge": "Mozilla/5.0 ({os}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
+        "Discord Client": "Mozilla/5.0 ({os})",
+    }
+
+    os_ua_map = {
+        "Windows": "Windows NT 10.0; Win64; x64",
+        "Linux": "X11; Linux x86_64",
+        "Mac OS X": "Macintosh; Intel Mac OS X 10_15_7",
+    }
+
+    ua = user_agents.get(browser, "").replace("{os}", os_ua_map.get(os_name, ""))
+
+    return {
+        "os": os_name,
+        "browser": browser,
+        "device": "",
+        "system_locale": "en-US",
+        "browser_user_agent": ua,
+        "browser_version": "125.0.0.0",
+        "os_version": "10",
+        "referrer": "",
+        "referring_domain": "",
+        "referrer_current": "",
+        "referring_domain_current": "",
+        "release_channel": "stable",
+        "client_build_number": 268847,
+        "client_event_source": None,
+    }
 
 
 def calculate_backoff(attempt: int) -> float:
@@ -57,7 +83,7 @@ class DiscordClient:
         self.token = token
         self.status = status
         self.client_index = client_index
-        self.properties = generate_client_properties(client_index)
+        self.properties = generate_client_properties(index=client_index)
         self.start_time = start_time
 
     async def get_user(self) -> User | None:
@@ -73,7 +99,16 @@ class DiscordClient:
 
     async def keep_online(self, server: Server, session: SessionState) -> None:
         """Maintain connection for a single server."""
-        async with websockets.connect(GATEWAY_URL, max_size=2**23) as ws:
+        ua = self.properties.get("browser_user_agent", "")
+        extra_headers = {
+            "Origin": "https://discord.com",
+            "User-Agent": ua or "Mozilla/5.0",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        async with websockets.connect(
+            GATEWAY_URL, max_size=2**23, extra_headers=extra_headers
+        ) as ws:
             hello = json.loads(await ws.recv())
             heartbeat_interval: float = hello["d"]["heartbeat_interval"] / 1000
 
@@ -83,36 +118,77 @@ class DiscordClient:
                 f"(heartbeat: {heartbeat_interval:.1f}s)",
             )
 
-            # Send identify packet with unique properties
+            # Identify with correct user token format:
+            # - capabilities: 16381 (all bits except NO_AFFINE_USER_IDS)
+            # - presence: status=unknown, empty activities (per Discord docs for user tokens)
+            # - client_state with api_code_version and guild_versions
             identify = {
                 "op": 2,
                 "d": {
                     "token": self.token,
+                    "capabilities": 16381,
                     "properties": self.properties,
+                    "compress": False,
                     "presence": {
-                        "status": self.status,
+                        "status": "unknown",
                         "since": 0,
-                        "activities": [
-                            {
-                                "name": ACTIVITY_NAME,
-                                "type": 0,
-                                "application_id": APP_ID,
-                                "details": ACTIVITY_DETAILS,
-                                "state": ACTIVITY_STATE,
-                                "timestamps": {"start": self.start_time},
-                                "buttons": ["GitHub Repository"],
-                                "metadata": {"button_urls": [REPO_URL]},
-                            }
-                        ],
+                        "activities": [],
                         "afk": False,
+                    },
+                    "client_state": {
+                        "api_code_version": 0,
+                        "guild_versions": {},
                     },
                 },
             }
             await ws.send(json.dumps(identify))
-            await ws.recv()
+
+            # Wait for READY
+            session_id = None
+            identified = False
+            while not identified:
+                msg = json.loads(await ws.recv())
+                op = msg.get("op")
+                t = msg.get("t")
+                if op == 0 and t == "READY":
+                    session_id = msg.get("d", {}).get("session_id")
+                    identified = True
+                    log(
+                        "info",
+                        f"[Server {self.client_index + 1}] Session ready "
+                        f"(session_id: {session_id})",
+                    )
+                elif op == 9:
+                    log(
+                        "warn",
+                        f"[Server {self.client_index + 1}] Invalid session, retrying...",
+                    )
+                    await asyncio.sleep(1)
+                    await ws.send(json.dumps(identify))
 
             # Mark as connected (for backoff reset)
             session.mark_connected()
+
+            # Send actual presence update (op 3) after identify
+            presence_update = {
+                "op": 3,
+                "d": {
+                    "status": self.status,
+                    "since": 0,
+                    "activities": [
+                        {
+                            "name": ACTIVITY_NAME,
+                            "type": 0,
+                        }
+                    ],
+                    "afk": False,
+                },
+            }
+            await ws.send(json.dumps(presence_update))
+            log(
+                "info",
+                f"[Server {self.client_index + 1}] Presence set to {self.status}",
+            )
 
             # Join voice channel
             voice_state = {
@@ -127,11 +203,11 @@ class DiscordClient:
             await ws.send(json.dumps(voice_state))
             log(
                 "info",
-                f"[Server {self.client_index + 1}] Joined voice channel "
-                f"{server.channel_id} in guild {server.guild_id}",
+                f"[Server {self.client_index + 1}] Voice state update sent: "
+                f"channel {server.channel_id} in guild {server.guild_id}",
             )
 
-            # Heartbeat loop with message reading
+            # Heartbeat loop with event processing
             async def heartbeat():
                 while True:
                     await ws.send(json.dumps({"op": 1, "d": None}))
@@ -139,7 +215,41 @@ class DiscordClient:
 
             async def message_reader():
                 while True:
-                    await ws.recv()
+                    msg = json.loads(await ws.recv())
+                    op = msg.get("op")
+                    t = msg.get("t")
+
+                    if op == 9:
+                        log(
+                            "warn",
+                            f"[Server {self.client_index + 1}] Session invalidated, reconnecting...",
+                        )
+                        raise websockets.ConnectionClosed(
+                            3000, "Session invalidated"
+                        )
+                    elif op == 7:
+                        log(
+                            "warn",
+                            f"[Server {self.client_index + 1}] Reconnect requested, reconnecting...",
+                        )
+                        raise websockets.ConnectionClosed(
+                            3000, "Reconnect requested"
+                        )
+                    elif op == 0 and t == "VOICE_STATE_UPDATE":
+                        vs = msg.get("d", {})
+                        log(
+                            "info",
+                            f"[Server {self.client_index + 1}] Voice state: "
+                            f"channel={vs.get('channel_id')}, "
+                            f"session_id={vs.get('session_id')}",
+                        )
+                    elif op == 0 and t == "VOICE_SERVER_UPDATE":
+                        vs = msg.get("d", {})
+                        log(
+                            "info",
+                            f"[Server {self.client_index + 1}] Voice server: "
+                            f"endpoint={vs.get('endpoint')}",
+                        )
 
             await asyncio.gather(heartbeat(), message_reader())
 
@@ -203,7 +313,6 @@ async def run_server_client(
             websockets.WebSocketException,
             OSError,
         ) as e:
-            # Reset backoff after successful connection
             if session.connected:
                 attempt = 0
 
@@ -248,10 +357,8 @@ async def spam_messages(token: str, channel_id: str, message: str, interval: flo
 
 async def run_all(settings: Settings) -> None:
     """Run all server connections and health server."""
-    # Capture start time once for consistent activity timestamps
     start_time = int(time.time() * 1000)
 
-    # Create a separate connection for each server
     health_server = HealthServer()
     tasks: list[asyncio.Task[None]] = [asyncio.create_task(health_server.start())]
 
@@ -261,7 +368,6 @@ async def run_all(settings: Settings) -> None:
         )
         tasks.append(task)
 
-    # Start spam task if enabled
     if settings.spam_enabled and settings.spam_channel_id:
         spam_task = asyncio.create_task(
             spam_messages(
