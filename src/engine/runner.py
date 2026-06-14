@@ -99,16 +99,7 @@ class DiscordClient:
 
     async def keep_online(self, server: Server, session: SessionState) -> None:
         """Maintain connection for a single server."""
-        ua = self.properties.get("browser_user_agent", "")
-        extra_headers = {
-            "Origin": "https://discord.com",
-            "User-Agent": ua or "Mozilla/5.0",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-
-        async with websockets.connect(
-            GATEWAY_URL, max_size=2**23, extra_headers=extra_headers
-        ) as ws:
+        async with websockets.connect(GATEWAY_URL, max_size=2**23) as ws:
             hello = json.loads(await ws.recv())
             heartbeat_interval: float = hello["d"]["heartbeat_interval"] / 1000
 
