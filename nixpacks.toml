@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["python311", "uv"]
+
+[phases.install]
+cmds = ["uv sync --frozen --no-dev --compile-bytecode"]
+
+[start]
+cmd = "uv run python -m src"

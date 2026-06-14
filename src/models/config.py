@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     status: Status = "online"
     servers_raw: Annotated[str, Field(alias="DISCORD_SERVERS", min_length=1)]
 
+    spam_channel_id: str = ""
+    spam_message: str = "🔥 Keeping the streak alive"
+    spam_interval: float = 0.5
+    spam_enabled: bool = False
+
     @property
     def servers(self) -> list[Server]:
         """Parse servers from comma-separated guild_id:channel_id pairs."""

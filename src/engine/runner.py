@@ -73,7 +73,7 @@ class DiscordClient:
 
     async def keep_online(self, server: Server, session: SessionState) -> None:
         """Maintain connection for a single server."""
-        async with websockets.connect(GATEWAY_URL) as ws:
+        async with websockets.connect(GATEWAY_URL, max_size=2**23) as ws:
             hello = json.loads(await ws.recv())
             heartbeat_interval: float = hello["d"]["heartbeat_interval"] / 1000
 
@@ -131,10 +131,17 @@ class DiscordClient:
                 f"{server.channel_id} in guild {server.guild_id}",
             )
 
-            # Simple heartbeat loop
-            while True:
-                await ws.send(json.dumps({"op": 1, "d": None}))
-                await asyncio.sleep(heartbeat_interval)
+            # Heartbeat loop with message reading
+            async def heartbeat():
+                while True:
+                    await ws.send(json.dumps({"op": 1, "d": None}))
+                    await asyncio.sleep(heartbeat_interval)
+
+            async def message_reader():
+                while True:
+                    await ws.recv()
+
+            await asyncio.gather(heartbeat(), message_reader())
 
 
 class HealthServer:
@@ -213,6 +220,32 @@ async def run_server_client(
             attempt += 1
 
 
+async def spam_messages(token: str, channel_id: str, message: str, interval: float) -> None:
+    """Send messages to a Discord channel repeatedly."""
+    while True:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{API_URL}/channels/{channel_id}/messages",
+                    headers={
+                        "Authorization": token,
+                        "Content-Type": "application/json",
+                    },
+                    json={"content": message},
+                )
+                if resp.status_code == 200:
+                    log("info", f"[Spam] Message sent to channel {channel_id}")
+                else:
+                    log(
+                        "warn",
+                        f"[Spam] Failed to send message: HTTP {resp.status_code}",
+                    )
+        except httpx.HTTPError as e:
+            log("warn", f"[Spam] HTTP error: {e}")
+
+        await asyncio.sleep(interval)
+
+
 async def run_all(settings: Settings) -> None:
     """Run all server connections and health server."""
     # Capture start time once for consistent activity timestamps
@@ -227,5 +260,22 @@ async def run_all(settings: Settings) -> None:
             run_server_client(settings.token, settings.status, server, i, start_time)
         )
         tasks.append(task)
+
+    # Start spam task if enabled
+    if settings.spam_enabled and settings.spam_channel_id:
+        spam_task = asyncio.create_task(
+            spam_messages(
+                settings.token,
+                settings.spam_channel_id,
+                settings.spam_message,
+                settings.spam_interval,
+            )
+        )
+        tasks.append(spam_task)
+        log(
+            "info",
+            f"[Spam] Enabled (interval: {settings.spam_interval}s, "
+            f"channel: {settings.spam_channel_id})",
+        )
 
     await asyncio.gather(*tasks)

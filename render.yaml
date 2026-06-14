@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: discord-streak
+    env: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DISCORD_STATUS
+        value: online
+      - key: DISCORD_SERVERS
+        sync: false
